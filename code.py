@@ -37,7 +37,7 @@ from typing import Any, Dict, Iterable, List, Tuple
 # -------------------------
 # Configuration
 # -------------------------
-# Your repo layout shows: ./trajs/{sweagent_claud4,sweagent_lm}/<traj_id_dir>/*.traj
+# Layout: ./trajs/{sweagent_claud4,sweagent_lm}/<traj_id_dir>/*.traj
 BASE_DIR = os.environ.get("SWE_TRAJ_DIR", "./trajs")
 
 REPRO_KEYWORDS = re.compile(r"(reproduce|repro|debug|test)", re.IGNORECASE)
@@ -47,10 +47,21 @@ REPRO_THOUGHT_HINTS = re.compile(
     re.IGNORECASE,
 )
 
-SEARCH_TOOL_NAMES = {"find_file", "search_file", "search_dir", "ripgrep", "rg"}
+# Add more search/navigation tools commonly seen in dumps
+SEARCH_TOOL_NAMES = {
+    "find_file", "search_file", "search_dir", "ripgrep", "rg",
+    "list_dir", "list_files", "open_file", "view_file", "read_file",
+    "glob", "walk", "search", "grep_file",
+}
 
+# Expand shell/navigation heads (POSIX + Windows)
 SHELL_SEARCH_CMDS = {
-    "find", "grep", "rg", "ag", "fd", "ls", "cd", "cat", "tree", "git", "git-grep"
+    # POSIX
+    "find", "grep", "rg", "ag", "fd", "ls", "cd", "cat", "tree", "git", "sed", "awk",
+    # Windows
+    "findstr", "where", "dir", "type",
+    # git helpers
+    "git-grep", "gitls", "git-ls-files",
 }
 
 KNOWN_TOOLS = {
@@ -74,32 +85,26 @@ def _candidate_files_for_id(instance_id: str) -> List[str]:
     exts = (".traj", ".json", ".jsonl", ".ndjson")
     paths: List[str] = []
 
-    # Problem slug (e.g., 'django__django-11820' from '...@django__django-11820')
     problem = instance_id.split("@")[-1] if "@" in instance_id else instance_id
 
-    # Direct file guesses (in case files are at top level)
     for base in (instance_id, problem):
         for ext in exts:
             p = os.path.join(BASE_DIR, f"{base}{ext}")
             if os.path.isfile(p):
                 paths.append(p)
 
-    # Recursive scan
     if os.path.isdir(BASE_DIR):
         for root, _, files in os.walk(BASE_DIR):
             for fn in files:
                 if not fn.endswith(exts):
                     continue
-                # Accept if filename mentions the problem slug or the full id
                 if problem in fn or instance_id in fn:
                     paths.append(os.path.join(root, fn))
 
-    # De-dup preserving order
     seen, uniq = set(), []
     for p in paths:
         if p not in seen:
-            seen.add(p)
-            uniq.append(p)
+            seen.add(p); uniq.append(p)
     return uniq
 
 
@@ -107,7 +112,7 @@ def _read_json_any(path: str) -> List[Dict[str, Any]]:
     """
     Read trajectory that may be:
       - a list[step]
-      - an object {"trajectory": list[step]} or {"steps": list[step]}
+      - {"trajectory": list[step]} or {"steps": list[step]}
       - NDJSON (one JSON object per line)
     Return a list of step dicts.
     """
@@ -117,7 +122,6 @@ def _read_json_any(path: str) -> List[Dict[str, Any]]:
     if not txt:
         return []
 
-    # Try plain JSON
     try:
         data = json.loads(txt)
         if isinstance(data, list):
@@ -131,7 +135,6 @@ def _read_json_any(path: str) -> List[Dict[str, Any]]:
     except json.JSONDecodeError:
         pass
 
-    # Try NDJSON
     steps: List[Dict[str, Any]] = []
     for line in txt.splitlines():
         line = line.strip()
@@ -220,15 +223,35 @@ def _get_args(step: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _get_command_string(step: Dict[str, Any]) -> str:
+    """
+    Extract a shell/terminal command string if present. Covers common single-string
+    fields, args-based fields, list-of-commands, and falls back to scanning messages.
+    """
     act = _get_action_obj(step)
+
     for k in ("cmd", "command", "shell", "bash", "run", "input"):
         v = act.get(k) if act else step.get(k)
         if isinstance(v, str):
             return v.strip()
-    for k in ("content", "message"):
-        v = step.get(k)
-        if isinstance(v, str) and any(tok in v for tok in ("grep", "find", "rg", "ls", "cd", "cat", "tree")):
+
+    args = _get_args(step)
+    for k in ("cmdline", "commandline"):
+        v = args.get(k)
+        if isinstance(v, str):
             return v.strip()
+
+    for k in ("commands", "cmds"):
+        v = args.get(k) or (act.get(k) if act else None)
+        if isinstance(v, list) and v and isinstance(v[0], str):
+            return " && ".join(v).strip()
+
+    for k in ("content", "message", "assistant_message"):
+        v = step.get(k)
+        if isinstance(v, str) and any(tok in v for tok in (
+            "grep", "find", "rg", "ls", "cd", "cat", "tree", "findstr", "dir", "type"
+        )):
+            return v.strip()
+
     return ""
 
 
@@ -362,6 +385,12 @@ def locate_search(instance_id: str) -> List[int]:
         if action == "view" and prev_was_search:
             this_is_search = True
 
+        # Thought-based fallback (helps when tools summarize searches)
+        if not this_is_search:
+            thought = _get_thought(step).lower()
+            if any(w in thought for w in ("search", "grep", "find in", "look for", "scan directory", "navigate to", "list files")):
+                this_is_search = True
+
         if this_is_search:
             hits.append(idx)
         prev_was_search = this_is_search
@@ -382,7 +411,6 @@ def locate_tool_use(instance_id: str) -> Dict[str, int]:
         action = _get_action_name(step).strip().lower()
         if action:
             bump(action)
-
         cmd = _get_command_string(step)
         head = _shell_head(cmd)
         if head:
