@@ -1,0 +1,35 @@
+{
+  "Traj ID": "scikit-learn__scikit-learn-14629",
+
+  "Issue Summary": "The issue occurs when using cross_val_predict(method='predict_proba') together with a MultiOutputClassifier in scikit-learn. Internally, cross_val_predict tries to access estimator.classes_, but MultiOutputClassifier does not expose a global classes_ attribute. Instead, each underlying estimator inside MultiOutputClassifier stores its labels in estimators_[i].classes_. Because of this mismatch, cross_val_predict raises an AttributeError when method='predict_proba' is used. The root cause is that the code assumes a single estimator with a single classes_ attribute, which is incompatible with the structure of MultiOutputClassifier.",
+
+  "Interaction Summary": "The agent analyzed the stack trace and the source code in sklearn/model_selection/_validation.py, where cross_val_predict collects class labels. It compared the behavior of a normal classifier with that of MultiOutputClassifier and identified that the error was caused by incorrect attribute access. The agent created a reproduction script based on the example in the issue description, then updated the implementation so that in the case of MultiOutputClassifier, classes are gathered from each sub-estimator rather than trying to access a nonexistent top-level classes_ attribute.",
+
+  "Reproduction Code": "The agent used the exact script provided in the issue description at step 2 to reproduce the bug. The script created a multilabel dataset using make_multilabel_classification, wrapped an LDA model in a MultiOutputClassifier, and ran cross_val_predict twice: first with the default method (which succeeded) and then with method='predict_proba' (which raised AttributeError).",
+
+  "1.1": "YES",
+
+  "1.2": "The reproduction script attempted to run cross_val_predict(mo_lda, X, Y, cv=5, method='predict_proba'). This triggered an AttributeError stating that MultiOutputClassifier has no attribute 'classes_'. The same script was reused after patching the source code, and it then returned a valid array of prediction probabilities. This confirmed both the presence of the bug and the success of the fix.",
+
+  "Search for the issue": "The agent searched inside sklearn/model_selection/_validation.py for the usage of 'classes_' and located the exact block of code where cross_val_predict tries to use estimator.classes_. It then reviewed the MultiOutputClassifier implementation in sklearn/multioutput.py to understand how class information is stored in sub-estimators.",
+
+  "2.1": "YES",
+
+  "2.2": "The agent used grep-like search techniques to find occurrences of 'classes_' in sklearn/model_selection/_validation.py and examined the surrounding logic that handled class collection for predict_proba. It also searched for MultiOutputClassifier in sklearn/multioutput.py to confirm that the classes are stored in estimators_[i].classes_ instead of a global attribute. These searches directly guided the patch location.",
+
+  "Edit the Code": "The agent edited sklearn/model_selection/_validation.py so that when the estimator is an instance of MultiOutputClassifier, cross_val_predict retrieves classes from each underlying estimator using estimator.estimators_[i].classes_ instead of estimator.classes_. This ensures compatibility with multi-output tasks and prevents the AttributeError.",
+
+  "4 Test changes on the reproduction code": "After applying the patch, the agent reran the same reproduction script. This time cross_val_predict with method='predict_proba' returned a valid probability array instead of raising an exception. The output shape was consistent with the number of outputs, and no errors were observed.",
+
+  "4.1": "YES",
+
+  "4.2": "The patched implementation passed the reproduction test successfully. No AttributeError was raised. The function returned valid probability predictions for all output targets. This confirmed that the fix was correct and did not break other functionality.",
+
+  "Tool-use analysis": {
+    "view": 2,
+    "create": 1,
+    "str_replace": 1,
+    "shell:python": 1,
+    "shell:grep": 1
+  }
+}
